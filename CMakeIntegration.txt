@@ -1,0 +1,28 @@
+add_executable(FMECart
+    FMECart/FMECart.cpp
+    FMECart/world_grid.cpp
+)
+
+target_sources(FMECart PRIVATE
+    common/arguments.cpp
+    common/configuration.cpp
+)
+
+target_link_libraries(FMECart PRIVATE
+    sample-resources
+    filamentapp
+    gltf-demo-resources
+    uberarchive
+    gltfio
+    viewer
+)
+
+target_include_directories(FMECart PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/FMECart
+    ${GENERATION_ROOT}
+)
+
+target_compile_options(FMECart PRIVATE ${COMPILER_FLAGS})
+
+set_target_properties(FMECart PROPERTIES FOLDER Samples)
