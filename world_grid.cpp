@@ -24,8 +24,7 @@ static inline void setLayer01Visible(Engine* engine, utils::Entity e) {
     }
 }
 
-WorldGrid* WorldGrid::create(Engine* engine, Scene* scene, float halfSize, float spacing, float y,
-        float thickness) {
+WorldGrid* WorldGrid::create(Engine* engine, Scene* scene, float halfSize, float spacing, float y, float thickness) {
     WorldGrid* grid = new WorldGrid();
 
     if (!grid->build(engine, scene, halfSize, spacing, y, thickness)) {
@@ -50,16 +49,20 @@ MaterialInstance* WorldGrid::createMaterial(Engine* engine, const float4& color)
     return instance;
 }
 
-bool WorldGrid::build(Engine* engine, Scene* scene, float halfSize, float spacing, float y,
-        float thickness) {
+bool WorldGrid::build(Engine* engine, Scene* scene, float halfSize, float spacing, float y, float thickness) {
     halfSize = std::clamp(halfSize, 0.1f, 10.0f);
     spacing = std::max(0.01f, spacing);
 
-    const int n = std::min(static_cast<int>(halfSize / spacing), 800);
+    const int n = std::min(static_cast<int>(std::round(halfSize / spacing)), 800);
+    const float extent = n * spacing;
 
     MaterialInstance* darkMaterial = createMaterial(engine, float4{ 0.13f, 0.23f, 0.38f, 1.0f });
+
     MaterialInstance* lightMaterial = createMaterial(engine, float4{ 0.31f, 0.48f, 0.67f, 1.0f });
+
     MaterialInstance* lineMaterial = createMaterial(engine, float4{ 0.92f, 0.96f, 1.00f, 1.0f });
+
+    MaterialInstance* centerLineMaterial = createMaterial(engine, float4{ 1.0f, 1.0f, 1.0f, 1.0f });
 
     std::vector<float3> darkVerts;
     std::vector<float3> lightVerts;
@@ -136,7 +139,7 @@ bool WorldGrid::build(Engine* engine, Scene* scene, float halfSize, float spacin
         utils::Entity entity = utils::EntityManager::get().create();
 
         RenderableManager::Builder(1)
-                .boundingBox({ { 0.0f, y, 0.0f }, { halfSize, 0.01f, halfSize } })
+                .boundingBox({ { 0.0f, y, 0.0f }, { extent, 0.01f, extent } })
                 .material(0, material)
                 .geometry(0, RenderableManager::PrimitiveType::TRIANGLES, vertexBuffer, indexBuffer)
                 .culling(false)
@@ -158,45 +161,62 @@ bool WorldGrid::build(Engine* engine, Scene* scene, float halfSize, float spacin
     std::vector<float3> lineVerts;
     std::vector<uint32_t> lineIdx;
 
-    const float lineY = y + 0.0006f;
-    const float w = std::max(thickness, spacing * 0.01f);
+    std::vector<float3> centerLineVerts;
+    std::vector<uint32_t> centerLineIdx;
 
-    auto addLineQuad = [&](float3 a, float3 b, bool major) {
+    const float lineY = y + 0.0006f;
+    const float centerLineY = y + 0.0012f;
+
+    const float w = std::max(thickness, spacing * 0.01f);
+    const float centerW = w * 4.0f;
+
+    auto addLineQuadTo = [](std::vector<float3>& vertices, std::vector<uint32_t>& indices, float3 a,
+                                 float3 b, float width) {
         float3 dir = b - a;
         const float len = length(dir);
+
         if (len < 1e-6f) {
             return;
         }
 
         dir /= len;
 
-        float3 up = { 0.0f, 1.0f, 0.0f };
-        float3 side = normalize(cross(dir, up));
+        const float3 up = { 0.0f, 1.0f, 0.0f };
+        float3 side = normalize(cross(dir, up)) * width;
 
-        float width = major ? w * 2.0f : w;
-        side *= width;
+        const uint32_t base = static_cast<uint32_t>(vertices.size());
 
-        const uint32_t base = static_cast<uint32_t>(lineVerts.size());
+        vertices.push_back(a - side);
+        vertices.push_back(a + side);
+        vertices.push_back(b + side);
+        vertices.push_back(b - side);
 
-        lineVerts.push_back(a - side);
-        lineVerts.push_back(a + side);
-        lineVerts.push_back(b + side);
-        lineVerts.push_back(b - side);
-
-        lineIdx.insert(lineIdx.end(),
+        indices.insert(indices.end(),
                 { base + 0, base + 1, base + 2, base + 2, base + 3, base + 0 });
     };
 
     for (int i = -n; i <= n; ++i) {
         const float p = i * spacing;
+        const bool center = i == 0;
         const bool major = (i % 10) == 0;
 
-        addLineQuad({ -halfSize, lineY, p }, { halfSize, lineY, p }, major);
+        if (center) {
+            addLineQuadTo(centerLineVerts, centerLineIdx, { -extent, centerLineY, p },
+                    { extent, centerLineY, p }, centerW);
 
-        addLineQuad({ p, lineY, -halfSize }, { p, lineY, halfSize }, major);
+            addLineQuadTo(centerLineVerts, centerLineIdx, { p, centerLineY, -extent },
+                    { p, centerLineY, extent }, centerW);
+        } else {
+            const float width = major ? w * 2.0f : w;
+
+            addLineQuadTo(lineVerts, lineIdx, { -extent, lineY, p }, { extent, lineY, p }, width);
+
+            addLineQuadTo(lineVerts, lineIdx, { p, lineY, -extent }, { p, lineY, extent }, width);
+        }
     }
 
     buildRenderable(lineVerts, lineIdx, lineMaterial);
+    buildRenderable(centerLineVerts, centerLineIdx, centerLineMaterial);
 
     return true;
 }

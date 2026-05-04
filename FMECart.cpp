@@ -139,12 +139,6 @@ static Camera* gPipCamera = nullptr;
 static utils::Entity gPipCameraEntity;
 static bool gShowPip = true;
 
-static utils::Entity gOriginSphere;
-static VertexBuffer* gOriginSphereVB = nullptr;
-static IndexBuffer* gOriginSphereIB = nullptr;
-static Material* gOriginSphereMaterial = nullptr;
-
-
 static const char* DEFAULT_IBL = "assets/ibl/lightroom_14b";
 static std::unique_ptr<WorldGrid> gWorldGrid;
 
@@ -413,7 +407,10 @@ static void createGroundPlane(Engine* engine, Scene* scene, App& app) {
     scene->addEntity(groundPlane);
 
     auto& tcm = engine->getTransformManager();
-    tcm.setTransform(tcm.getInstance(groundPlane), mat4f::translation(float3{ 0, aabb.min.y, -4 }));
+    constexpr float gridY = -0.02f;
+    constexpr float shadowY = gridY + 0.005f;
+
+    tcm.setTransform(tcm.getInstance(groundPlane), mat4f::translation(float3{ 0, shadowY, 0 }));
 
     auto& rcm = engine->getRenderableManager();
     auto instance = rcm.getInstance(groundPlane);
@@ -587,64 +584,6 @@ static bool checkGLTFAsset(const utils::Path& filename) {
 
 static utils::Entity gOriginMarker;
 
-static void createOriginMarker(Engine* engine, Scene* scene) {
-    static const float s = 0.05f;
-
-    static const float3 vertices[] = {
-        { -s, -s, -s },
-        { s, -s, -s },
-        { s, s, -s },
-        { -s, s, -s },
-        { -s, -s, s },
-        { s, -s, s },
-        { s, s, s },
-        { -s, s, s },
-    };
-
-    static const uint16_t indices[] = {
-        0, 1, 2, 2, 3, 0,
-        4, 6, 5, 6, 4, 7,
-        0, 4, 5, 5, 1, 0,
-        1, 5, 6, 6, 2, 1,
-        2, 6, 7, 7, 3, 2,
-        3, 7, 4, 4, 0, 3,
-    };
-
-    VertexBuffer* vb =
-            VertexBuffer::Builder()
-                    .vertexCount(8)
-                    .bufferCount(1)
-                    .attribute(VertexAttribute::POSITION, 0, VertexBuffer::AttributeType::FLOAT3)
-                    .build(*engine);
-
-    vb->setBufferAt(*engine, 0, VertexBuffer::BufferDescriptor(vertices, sizeof(vertices)));
-
-    IndexBuffer* ib = IndexBuffer::Builder()
-                              .indexCount(36)
-                              .bufferType(IndexBuffer::IndexType::USHORT)
-                              .build(*engine);
-
-    ib->setBuffer(*engine, IndexBuffer::BufferDescriptor(indices, sizeof(indices)));
-
-    Material* mat = Material::Builder()
-                            .package(GLTF_DEMO_OVERDRAW_DATA, GLTF_DEMO_OVERDRAW_SIZE)
-                            .build(*engine);
-
-    MaterialInstance* mi = mat->createInstance();
-    mi->setParameter("color", float3{ 1.0f, 0.0f, 0.0f });
-
-    gOriginMarker = EntityManager::get().create();
-
-    RenderableManager::Builder(1)
-            .boundingBox({ { -s, -s, -s }, { s, s, s } })
-            .material(0, mi)
-            .geometry(0, RenderableManager::PrimitiveType::TRIANGLES, vb, ib)
-            .culling(false)
-            .build(*engine, gOriginMarker);
-
-    scene->addEntity(gOriginMarker);
-}
-
 int main(int argc, char** argv) {
     App app;
 
@@ -799,11 +738,6 @@ int main(int argc, char** argv) {
         gPipView->setScene(scene);
         gPipView->setCamera(gPipCamera);
         gPipView->setName("PiP View");
-
-        gPipCamera->lookAt(float3{ 0.0f, 10.0f, 0.0f }, // camera above scene
-                           float3{ 0.0f, 0.0f, 0.0f }, // looking at origin
-                           float3{ 1.0f, 0.0f, 0.0f }  // forward-facing up direction
-        );
         // ---------------------------------------------------------------------
 
         const bool batchMode = !app.batchFile.empty();
@@ -879,7 +813,7 @@ int main(int argc, char** argv) {
         app.viewer->setAsset(app.asset, app.instance);
 
         createGroundPlane(engine, scene, app);
-        gWorldGrid.reset(WorldGrid::create(engine, scene, 10.0f, 0.25f, -0.1f, 0.0025f));
+        gWorldGrid.reset(WorldGrid::create(engine, scene, 5.0f, 0.25f, -0.02f, 0.0025f));
 
         //createOriginMarker(engine, scene);
 
@@ -1335,18 +1269,35 @@ int main(int argc, char** argv) {
             gPipView->setViewport(
                     { static_cast<int32_t>(pipX), static_cast<int32_t>(pipY), pipW, pipH });
 
-            Aabb aabb = app.asset->getBoundingBox();
-            float3 center = aabb.center();
+            auto& tcm = engine->getTransformManager();
 
-            if (!app.actualSize) {
-                mat4f transform = fitIntoUnitCube(aabb, 4);
-                center = (transform * float4{ center, 1.0f }).xyz;
+            Aabb localAabb = app.asset->getBoundingBox();
+
+            const auto assetRoot = app.asset->getRoot();
+            const auto assetRootInst = tcm.getInstance(assetRoot);
+
+            Aabb worldAabb = localAabb;
+
+            if (assetRootInst) {
+                const mat4f worldTransform = tcm.getWorldTransform(assetRootInst);
+                worldAabb = localAabb.transform(worldTransform);
             }
 
-            gPipCamera->lookAt(center + float3{ 0.0f, 3.0f, 0.0f }, center,
+            const float3 center = worldAabb.center();
+            const float3 extent = worldAabb.extent();
+
+            const float radius = std::max(length(extent), 0.01f);
+
+            const float fovDeg = 45.0f;
+            const float distance = std::max(radius * 2.5f, 1.0f);
+
+            const float nearPlane = std::max(distance * 0.001f, 0.01f);
+            const float farPlane = std::max(distance + radius * 4.0f, 100.0f);
+
+            gPipCamera->lookAt(center + float3{ 0.0f, distance, 0.0f }, center,
                     float3{ 1.0f, 0.0f, 0.0f });
 
-            gPipCamera->setProjection(45.0, 1.0, 0.05, 100.0, Camera::Fov::VERTICAL);
+            gPipCamera->setProjection(fovDeg, 1.0, nearPlane, farPlane, Camera::Fov::VERTICAL);
 
             renderer->render(gPipView);
         }
