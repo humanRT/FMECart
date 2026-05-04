@@ -1,0 +1,13 @@
+.vs/
+*.VC.db
+*.VC.db-shm
+*.VC.db-wal
+*.opendb
+*.sqlite
+*.ipch
+*.suo
+*.user
+cmake.db
+ProjectSettings.json
+*.bat
+*.STL

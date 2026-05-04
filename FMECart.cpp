@@ -134,6 +134,17 @@ struct App {
     bool screenshotAsPPM = false;
 };
 
+static View* gPipView = nullptr;
+static Camera* gPipCamera = nullptr;
+static utils::Entity gPipCameraEntity;
+static bool gShowPip = true;
+
+static utils::Entity gOriginSphere;
+static VertexBuffer* gOriginSphereVB = nullptr;
+static IndexBuffer* gOriginSphereIB = nullptr;
+static Material* gOriginSphereMaterial = nullptr;
+
+
 static const char* DEFAULT_IBL = "assets/ibl/lightroom_14b";
 static std::unique_ptr<WorldGrid> gWorldGrid;
 
@@ -574,6 +585,65 @@ static bool checkGLTFAsset(const utils::Path& filename) {
     return true;
 };
 
+static utils::Entity gOriginMarker;
+
+static void createOriginMarker(Engine* engine, Scene* scene) {
+    static const float s = 0.05f;
+
+    static const float3 vertices[] = {
+        { -s, -s, -s },
+        { s, -s, -s },
+        { s, s, -s },
+        { -s, s, -s },
+        { -s, -s, s },
+        { s, -s, s },
+        { s, s, s },
+        { -s, s, s },
+    };
+
+    static const uint16_t indices[] = {
+        0, 1, 2, 2, 3, 0,
+        4, 6, 5, 6, 4, 7,
+        0, 4, 5, 5, 1, 0,
+        1, 5, 6, 6, 2, 1,
+        2, 6, 7, 7, 3, 2,
+        3, 7, 4, 4, 0, 3,
+    };
+
+    VertexBuffer* vb =
+            VertexBuffer::Builder()
+                    .vertexCount(8)
+                    .bufferCount(1)
+                    .attribute(VertexAttribute::POSITION, 0, VertexBuffer::AttributeType::FLOAT3)
+                    .build(*engine);
+
+    vb->setBufferAt(*engine, 0, VertexBuffer::BufferDescriptor(vertices, sizeof(vertices)));
+
+    IndexBuffer* ib = IndexBuffer::Builder()
+                              .indexCount(36)
+                              .bufferType(IndexBuffer::IndexType::USHORT)
+                              .build(*engine);
+
+    ib->setBuffer(*engine, IndexBuffer::BufferDescriptor(indices, sizeof(indices)));
+
+    Material* mat = Material::Builder()
+                            .package(GLTF_DEMO_OVERDRAW_DATA, GLTF_DEMO_OVERDRAW_SIZE)
+                            .build(*engine);
+
+    MaterialInstance* mi = mat->createInstance();
+    mi->setParameter("color", float3{ 1.0f, 0.0f, 0.0f });
+
+    gOriginMarker = EntityManager::get().create();
+
+    RenderableManager::Builder(1)
+            .boundingBox({ { -s, -s, -s }, { s, s, s } })
+            .material(0, mi)
+            .geometry(0, RenderableManager::PrimitiveType::TRIANGLES, vb, ib)
+            .culling(false)
+            .build(*engine, gOriginMarker);
+
+    scene->addEntity(gOriginMarker);
+}
 
 int main(int argc, char** argv) {
     App app;
@@ -720,6 +790,22 @@ int main(int argc, char** argv) {
         tcm.create(app.rootTransformEntity);
         tcm.create(view->getFogEntity());
 
+        // PIP View ------------------------------------------------------------
+        gPipView = engine->createView();
+
+        gPipCameraEntity = utils::EntityManager::get().create();
+        gPipCamera = engine->createCamera(gPipCameraEntity);
+
+        gPipView->setScene(scene);
+        gPipView->setCamera(gPipCamera);
+        gPipView->setName("PiP View");
+
+        gPipCamera->lookAt(float3{ 0.0f, 10.0f, 0.0f }, // camera above scene
+                           float3{ 0.0f, 0.0f, 0.0f }, // looking at origin
+                           float3{ 1.0f, 0.0f, 0.0f }  // forward-facing up direction
+        );
+        // ---------------------------------------------------------------------
+
         const bool batchMode = !app.batchFile.empty();
 
         // First check if a custom automation spec has been provided. If it fails to load, the app
@@ -794,6 +880,8 @@ int main(int argc, char** argv) {
 
         createGroundPlane(engine, scene, app);
         gWorldGrid.reset(WorldGrid::create(engine, scene, 10.0f, 0.25f, -0.1f, 0.0025f));
+
+        //createOriginMarker(engine, scene);
 
         createOverdrawVisualizerEntities(engine, scene, app);
 
@@ -1057,6 +1145,23 @@ int main(int argc, char** argv) {
         }
         engine->destroy(app.scene.overdrawMaterial);
 
+        if (gPipView) {
+            engine->destroy(gPipView);
+            gPipView = nullptr;
+        }
+
+        if (gPipCamera) {
+            engine->destroyCameraComponent(gPipCameraEntity);
+            utils::EntityManager::get().destroy(gPipCameraEntity);
+            gPipCamera = nullptr;
+            gPipCameraEntity = {};
+        }
+
+        if (gWorldGrid) {
+            gWorldGrid->destroy(engine);
+            gWorldGrid.release();
+        }
+
         delete app.viewer;
         delete app.materials;
         delete app.names;
@@ -1102,11 +1207,16 @@ int main(int argc, char** argv) {
         double const aspectRatio = (double) vp.width / vp.height;
         camera.setScaling({ 1.0 / aspectRatio, 1.0 });
     };
-
-    // SIDEBAR VISIBILITY --------------------------------------------------------------------
+    
+    // * * * * * * * * * * GUI * * * * * * * * * * * *
     auto gui = [&app](Engine*, View*) {
         static bool sidebarVisible = false;
 
+        if (ImGui::IsKeyPressed(ImGuiKey_P)) {
+            gShowPip = !gShowPip;
+        }
+
+        // SIDEBAR VISIBILITY ------------------------------------------------
         if (ImGui::IsKeyPressed(ImGuiKey_H)) {
             sidebarVisible = !sidebarVisible;
         }
@@ -1118,7 +1228,7 @@ int main(int argc, char** argv) {
             FilamentApp::get().setSidebarWidth(0);
         }
     };
-    // ---------------------------------------------------------------------------------------
+    // ------------------------------------------------------------------------
 
     auto preRender = [&app](Engine* engine, View* view, Scene* scene, Renderer* renderer) {
         auto& rcm = engine->getRenderableManager();
@@ -1211,6 +1321,36 @@ int main(int argc, char** argv) {
     };
 
     auto postRender = [&app](Engine* engine, View* view, Scene* scene, Renderer* renderer) {
+        if (gShowPip && gPipView && gPipCamera) {
+            const Viewport& mainVp = view->getViewport();
+
+            const uint32_t pipSize = std::max(240u, std::min(mainVp.width, mainVp.height) / 4u);
+            const uint32_t pipW = pipSize;
+            const uint32_t pipH = pipSize;
+            const uint32_t margin = 24u;
+
+            const uint32_t pipX = mainVp.left + mainVp.width - pipW - margin;
+            const uint32_t pipY = mainVp.bottom + mainVp.height - pipH - margin;
+
+            gPipView->setViewport(
+                    { static_cast<int32_t>(pipX), static_cast<int32_t>(pipY), pipW, pipH });
+
+            Aabb aabb = app.asset->getBoundingBox();
+            float3 center = aabb.center();
+
+            if (!app.actualSize) {
+                mat4f transform = fitIntoUnitCube(aabb, 4);
+                center = (transform * float4{ center, 1.0f }).xyz;
+            }
+
+            gPipCamera->lookAt(center + float3{ 0.0f, 3.0f, 0.0f }, center,
+                    float3{ 1.0f, 0.0f, 0.0f });
+
+            gPipCamera->setProjection(45.0, 1.0, 0.05, 100.0, Camera::Fov::VERTICAL);
+
+            renderer->render(gPipView);
+        }
+
         if (app.screenshot) {
             std::ostringstream stringStream;
             stringStream << "screenshot" << std::setfill('0') << std::setw(2) << +app.screenshotSeq;
