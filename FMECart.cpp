@@ -141,19 +141,42 @@ static bool gShowPip = true;
 static bool gShowGrid = false;
 
 // Button -> Tool motion ------------------------------------------------------
-// Adjust these two values for the required stroke and speed.
-static constexpr float TOOL_X_TRAVEL = 0.50f;      // model/local X units
-static constexpr float TOOL_MOVE_DURATION = 2.00f; // seconds
+static constexpr float TOOL_Z_TRAVEL = -0.70f;
+static constexpr float TOOL_MOVE_DURATION = 8.00f;
 
 static utils::Entity gToolEntity;
+
+static bool gToolHomeCaptured = false;
 static bool gToolMoveActive = false;
-static bool gToolMoveInitialized = false;
+static bool gToolIsOut = false;
+static bool gToolTargetOut = false;
+
 static float gToolMoveElapsed = 0.0f;
+static float gToolMoveDuration = TOOL_MOVE_DURATION;
+
+static mat4f gToolHomeTransform;
 static mat4f gToolMoveStart;
+static mat4f gToolMoveEnd;
 // ---------------------------------------------------------------------------
 
 static const char* DEFAULT_IBL = "assets/ibl/lightroom_14b";
 static std::unique_ptr<WorldGrid> gWorldGrid;
+
+static bool getEntityWorldTransform(App& app, utils::Entity entity, mat4f* out) {
+    if (entity.isNull()) {
+        return false;
+    }
+
+    auto& tcm = app.engine->getTransformManager();
+    auto inst = tcm.getInstance(entity);
+
+    if (!inst) {
+        return false;
+    }
+
+    *out = tcm.getWorldTransform(inst);
+    return true;
+}
 
 static void printUsage(char* name) {
     std::string const exec_name(Path(name).getName());
@@ -539,43 +562,83 @@ static void startToolMove(App& app) {
 
     auto& tcm = app.engine->getTransformManager();
     auto toolInstance = tcm.getInstance(gToolEntity);
+
     if (!toolInstance) {
         app.notificationText = "Button pressed, but Tool has no transform";
         return;
     }
 
-    // Capture the current transform, so repeated button presses move the tool
-    // by the same increment from wherever it currently is.
-    gToolMoveStart = tcm.getTransform(toolInstance);
+    const mat4f currentTransform = tcm.getTransform(toolInstance);
+
+    if (!gToolHomeCaptured) {
+        gToolHomeTransform = currentTransform;
+        gToolHomeCaptured = true;
+        gToolIsOut = false;
+        gToolTargetOut = false;
+    }
+
+    // If already moving, reverse direction.
+    // If stopped, toggle between home and extended positions.
+    if (gToolMoveActive) {
+        gToolTargetOut = !gToolTargetOut;
+    } else {
+        gToolTargetOut = !gToolIsOut;
+    }
+
+    gToolMoveStart = currentTransform;
+    gToolMoveEnd = gToolHomeTransform;
+
+    if (gToolTargetOut) {
+        gToolMoveEnd[3].z += TOOL_Z_TRAVEL;
+    }
+
+    const float remainingTravel = std::abs(gToolMoveEnd[3].z - gToolMoveStart[3].z);
+    const float fullTravel = std::max(std::abs(TOOL_Z_TRAVEL), 0.0001f);
+
+    gToolMoveDuration = TOOL_MOVE_DURATION * (remainingTravel / fullTravel);
+    gToolMoveDuration = std::max(gToolMoveDuration, 0.05f);
+
     gToolMoveElapsed = 0.0f;
-    gToolMoveInitialized = true;
     gToolMoveActive = true;
+
+    app.notificationText = gToolTargetOut ? "Tool moving out" : "Tool moving in";
 }
 
 static void updateToolMove(App& app, float dt) {
-    if (!gToolMoveActive || !gToolMoveInitialized || gToolEntity.isNull()) {
+    if (!gToolMoveActive || gToolEntity.isNull()) {
         return;
     }
 
     auto& tcm = app.engine->getTransformManager();
     auto toolInstance = tcm.getInstance(gToolEntity);
+
     if (!toolInstance) {
         gToolMoveActive = false;
         return;
     }
 
     gToolMoveElapsed += dt;
-    const float rawT = std::min(gToolMoveElapsed / TOOL_MOVE_DURATION, 1.0f);
 
-    // Smoothstep easing: slow start, smooth finish.
+    const float rawT = std::min(gToolMoveElapsed / gToolMoveDuration, 1.0f);
+
+    // Smoothstep easing.
     const float t = rawT * rawT * (3.0f - 2.0f * rawT);
 
     mat4f transform = gToolMoveStart;
-    transform[3].x += TOOL_X_TRAVEL * t;
+
+    transform[3].x = gToolMoveStart[3].x + (gToolMoveEnd[3].x - gToolMoveStart[3].x) * t;
+    transform[3].y = gToolMoveStart[3].y + (gToolMoveEnd[3].y - gToolMoveStart[3].y) * t;
+    transform[3].z = gToolMoveStart[3].z + (gToolMoveEnd[3].z - gToolMoveStart[3].z) * t;
+
     tcm.setTransform(toolInstance, transform);
 
     if (rawT >= 1.0f) {
+        tcm.setTransform(toolInstance, gToolMoveEnd);
+
+        gToolIsOut = gToolTargetOut;
         gToolMoveActive = false;
+
+        app.notificationText = gToolIsOut ? "Tool out" : "Tool in";
     }
 }
 
@@ -733,7 +796,7 @@ static utils::Entity gOriginMarker;
 int main(int argc, char** argv) {
     App app;
 
-    app.config.title = "Filament";
+    app.config.title = "CWEST Inspection Concept";
     app.config.iblDirectory = FilamentApp::getRootAssetsPath() + DEFAULT_IBL;
 
     int const optionIndex = handleCommandLineArguments(argc, argv, &app);
@@ -1458,10 +1521,61 @@ int main(int argc, char** argv) {
             const float nearPlane = std::max(distance * 0.001f, 0.01f);
             const float farPlane = std::max(distance + radius * 4.0f, 100.0f);
 
-            gPipCamera->lookAt(center + float3{ 0.0f, distance, 0.0f }, center,
-                    float3{ 1.0f, 0.0f, 0.0f });
+            static utils::Entity myCameraEntity;
+            static bool myCameraSearched = false;
+
+            if (!myCameraSearched) {
+                myCameraEntity = findEntityByName(app, "MyCamera");
+                myCameraSearched = true;
+
+                if (myCameraEntity.isNull()) {
+                    std::cout << "[PiP Camera] MyCamera not found" << std::endl;
+                } else {
+                    std::cout << "[PiP Camera] MyCamera found, entity=" << myCameraEntity.getId()
+                              << std::endl;
+                }
+            }
+
+            mat4f myCameraWorld;
+
+            if (getEntityWorldTransform(app, myCameraEntity, &myCameraWorld)) {
+                static utils::Entity myTargetEntity;
+                static bool myTargetSearched = false;
+
+                if (!myTargetSearched) {
+                    myTargetEntity = findEntityByName(app, "MyTarget");
+                    myTargetSearched = true;
+                }
+
+                mat4f myTargetWorld;
+
+                if (getEntityWorldTransform(app, myTargetEntity, &myTargetWorld)) {
+                    const float3 cameraPos = myCameraWorld[3].xyz;
+                    const float3 targetPos = myTargetWorld[3].xyz;
+
+                    gPipCamera->lookAt(cameraPos, targetPos, float3{ 0.0f, 1.0f, 0.0f });
+                } else {
+                    gPipCamera->setModelMatrix(myCameraWorld);
+                }
+            } else {
+                gPipCamera->lookAt(center + float3{ 0.0f, distance, 0.0f }, center,
+                        float3{ 1.0f, 0.0f, 0.0f });
+            }
 
             gPipCamera->setProjection(fovDeg, 1.0, nearPlane, farPlane, Camera::Fov::VERTICAL);
+
+            // Apply the same visual settings used by the main view.
+            gPipView->setColorGrading(app.colorGrading);
+            gPipView->setAmbientOcclusionOptions(view->getAmbientOcclusionOptions());
+            gPipView->setBloomOptions(view->getBloomOptions());
+            gPipView->setDepthOfFieldOptions(view->getDepthOfFieldOptions());
+            gPipView->setFogOptions(view->getFogOptions());
+            gPipView->setScreenSpaceReflectionsOptions(view->getScreenSpaceReflectionsOptions());
+            gPipView->setVignetteOptions(view->getVignetteOptions());
+            gPipView->setAntiAliasing(view->getAntiAliasing());
+            gPipView->setSampleCount(view->getSampleCount());
+            gPipView->setDithering(view->getDithering());
+            gPipView->setShadowingEnabled(view->isShadowingEnabled());
 
             renderer->render(gPipView);
         }
