@@ -138,6 +138,7 @@ static View* gPipView = nullptr;
 static Camera* gPipCamera = nullptr;
 static utils::Entity gPipCameraEntity;
 static bool gShowPip = true;
+static bool gShowGrid = false;
 
 static const char* DEFAULT_IBL = "assets/ibl/lightroom_14b";
 static std::unique_ptr<WorldGrid> gWorldGrid;
@@ -1150,6 +1151,11 @@ int main(int argc, char** argv) {
             gShowPip = !gShowPip;
         }
 
+        // GRID VISIBILITY ---------------------------------------------------
+        if (ImGui::IsKeyPressed(ImGuiKey_G)) {
+            gShowGrid = !gShowGrid;
+        }
+
         // SIDEBAR VISIBILITY ------------------------------------------------
         if (ImGui::IsKeyPressed(ImGuiKey_H)) {
             sidebarVisible = !sidebarVisible;
@@ -1169,6 +1175,12 @@ int main(int argc, char** argv) {
         auto instance = rcm.getInstance(app.scene.groundPlane);
         const auto viewerOptions = app.automationEngine->getViewerOptions();
         rcm.setLayerMask(instance, 0xff, viewerOptions.groundPlaneEnabled ? 0xff : 0x00);
+
+        // GRID VISIBILITY ----------------------------------------------------
+        if (gWorldGrid) {
+            gWorldGrid->setVisible(engine, gShowGrid);
+        }
+        // --------------------------------------------------------------------
 
         engine->setAutomaticInstancingEnabled(viewerOptions.autoInstancingEnabled);
 
