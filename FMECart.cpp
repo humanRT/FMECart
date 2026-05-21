@@ -140,6 +140,18 @@ static utils::Entity gPipCameraEntity;
 static bool gShowPip = true;
 static bool gShowGrid = false;
 
+// Button -> Tool motion ------------------------------------------------------
+// Adjust these two values for the required stroke and speed.
+static constexpr float TOOL_X_TRAVEL = 0.50f;      // model/local X units
+static constexpr float TOOL_MOVE_DURATION = 2.00f; // seconds
+
+static utils::Entity gToolEntity;
+static bool gToolMoveActive = false;
+static bool gToolMoveInitialized = false;
+static float gToolMoveElapsed = 0.0f;
+static mat4f gToolMoveStart;
+// ---------------------------------------------------------------------------
+
 static const char* DEFAULT_IBL = "assets/ibl/lightroom_14b";
 static std::unique_ptr<WorldGrid> gWorldGrid;
 
@@ -366,10 +378,10 @@ static void createGroundPlane(Engine* engine, Scene* scene, App& app) {
         { planeExtent.x, 0, -planeExtent.z },
     };
 
-    short4 const tbn = packSnorm16(
-            mat3f::packTangentFrame(mat3f{ float3{ 1.0f, 0.0f, 0.0f }, float3{ 0.0f, 0.0f, 1.0f },
-                                        float3{ 0.0f, 1.0f, 0.0f } })
-                    .xyzw);
+    short4 const tbn = packSnorm16(mat3f::packTangentFrame(
+            mat3f{ float3{ 1.0f, 0.0f, 0.0f }, float3{ 0.0f, 0.0f, 1.0f },
+                float3{ 0.0f, 1.0f,
+                    0.0f } }).xyzw);
 
     const static short4 normals[]{ tbn, tbn, tbn, tbn };
 
@@ -496,12 +508,145 @@ static void createOverdrawVisualizerEntities(Engine* engine, Scene* scene, App& 
     app.scene.fullScreenTriangleIndexBuffer = indexBuffer;
 }
 
+static bool nameMatches(const char* name, const char* expected) {
+    return name &&
+           (std::string(name) == expected || std::string(name).find(expected) != std::string::npos);
+}
+
+static utils::Entity findEntityByName(App& app, const char* expectedName) {
+    const utils::Entity* entities = app.asset->getEntities();
+    const size_t entityCount = app.asset->getEntityCount();
+
+    for (size_t i = 0; i < entityCount; ++i) {
+        const char* name = app.asset->getName(entities[i]);
+        if (nameMatches(name, expectedName)) {
+            return entities[i];
+        }
+    }
+
+    return {};
+}
+
+static void startToolMove(App& app) {
+    if (gToolEntity.isNull()) {
+        gToolEntity = findEntityByName(app, "Tool");
+    }
+
+    if (gToolEntity.isNull()) {
+        app.notificationText = "Button pressed, but Tool was not found";
+        return;
+    }
+
+    auto& tcm = app.engine->getTransformManager();
+    auto toolInstance = tcm.getInstance(gToolEntity);
+    if (!toolInstance) {
+        app.notificationText = "Button pressed, but Tool has no transform";
+        return;
+    }
+
+    // Capture the current transform, so repeated button presses move the tool
+    // by the same increment from wherever it currently is.
+    gToolMoveStart = tcm.getTransform(toolInstance);
+    gToolMoveElapsed = 0.0f;
+    gToolMoveInitialized = true;
+    gToolMoveActive = true;
+}
+
+static void updateToolMove(App& app, float dt) {
+    if (!gToolMoveActive || !gToolMoveInitialized || gToolEntity.isNull()) {
+        return;
+    }
+
+    auto& tcm = app.engine->getTransformManager();
+    auto toolInstance = tcm.getInstance(gToolEntity);
+    if (!toolInstance) {
+        gToolMoveActive = false;
+        return;
+    }
+
+    gToolMoveElapsed += dt;
+    const float rawT = std::min(gToolMoveElapsed / TOOL_MOVE_DURATION, 1.0f);
+
+    // Smoothstep easing: slow start, smooth finish.
+    const float t = rawT * rawT * (3.0f - 2.0f * rawT);
+
+    mat4f transform = gToolMoveStart;
+    transform[3].x += TOOL_X_TRAVEL * t;
+    tcm.setTransform(toolInstance, transform);
+
+    if (rawT >= 1.0f) {
+        gToolMoveActive = false;
+    }
+}
+
+static inline ImVec2 getMouseInFramebuffer(View* view) {
+    const Viewport vp = view->getViewport();
+    const ImVec2 p = ImGui::GetMousePos();
+    const ImVec2 fb = ImGui::GetIO().DisplayFramebufferScale;
+
+    const float fbX = p.x * fb.x;
+    const float fbY = p.y * fb.y;
+
+    const float x = fbX - float(vp.left);
+    const float y = float(vp.bottom + vp.height - 1) - fbY;
+
+    return ImVec2{ x, y };
+}
+
+static const char* getPickedName(App& app, utils::Entity pickedEntity,
+        utils::Entity* namedEntityOut) {
+    auto& tcm = app.engine->getTransformManager();
+
+    utils::Entity current = pickedEntity;
+
+    while (!current.isNull()) {
+        if (const char* name = app.asset->getName(current); name) {
+            if (namedEntityOut) {
+                *namedEntityOut = current;
+            }
+            return name;
+        }
+
+        auto inst = tcm.getInstance(current);
+        if (!inst) {
+            break;
+        }
+
+        current = tcm.getParent(inst);
+    }
+
+    if (namedEntityOut) {
+        *namedEntityOut = pickedEntity;
+    }
+
+    return nullptr;
+}
+
 static void onClick(App& app, View* view, ImVec2 pos) {
     view->pick(pos.x, pos.y, [&app](View::PickingQueryResult const& result) {
-        if (const char* name = app.asset->getName(result.renderable); name) {
+        if (result.renderable.isNull()) {
+            std::cout << "[FMECart Selection] Pick missed" << std::endl;
+            return;
+        }
+
+        utils::Entity namedEntity;
+        const char* name = getPickedName(app, result.renderable, &namedEntity);
+
+        if (name) {
             app.notificationText = name;
+
+            std::cout << "[FMECart Selection] Picked renderable=" << result.renderable.getId()
+                      << " namedEntity=" << namedEntity.getId() << " name=" << name << std::endl;
+
+            if (nameMatches(name, "Button")) {
+                std::cout << "[FMECart Selection] Button pressed" << std::endl;
+                startToolMove(app);
+            }
         } else {
             app.notificationText.clear();
+
+            std::cout << "[FMECart Selection] Picked unnamed renderable="
+                      << result.renderable.getId() << std::endl;
         }
     });
 }
@@ -816,25 +961,27 @@ int main(int argc, char** argv) {
         createGroundPlane(engine, scene, app);
         gWorldGrid.reset(WorldGrid::create(engine, scene, 5.0f, 0.25f, -0.02f, 0.0025f));
 
-        //createOriginMarker(engine, scene);
+        // createOriginMarker(engine, scene);
 
         createOverdrawVisualizerEntities(engine, scene, app);
 
         app.viewer->setUiCallback([&app, scene, view, engine]() {
             auto& automation = *app.automationEngine;
 
-            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                ImVec2 pos = ImGui::GetMousePos();
-                pos.x -= app.viewer->getSidebarWidth();
-                pos.x *= ImGui::GetIO().DisplayFramebufferScale.x;
-                pos.y *= ImGui::GetIO().DisplayFramebufferScale.y;
-                if (pos.x > 0) {
-                    pos.y = view->getViewport().height - 1 - pos.y;
+            const ImVec4 yellow(1.0f, 1.0f, 0.0f, 1.0f);
+
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::GetIO().WantCaptureMouse) {
+                ImVec2 pos = getMouseInFramebuffer(view);
+
+                std::cout << "[FMECart Selection] UI callback mouse x=" << pos.x << " y=" << pos.y
+                          << " viewport width=" << view->getViewport().width
+                          << " height=" << view->getViewport().height << std::endl;
+
+                if (pos.x >= 0.0f && pos.y >= 0.0f && pos.x < float(view->getViewport().width) &&
+                        pos.y < float(view->getViewport().height)) {
                     onClick(app, view, pos);
                 }
             }
-
-            const ImVec4 yellow(1.0f, 1.0f, 0.0f, 1.0f);
 
             if (!app.notificationText.empty()) {
                 ImGui::TextColored(yellow, "Picked %s", app.notificationText.c_str());
@@ -1142,9 +1289,9 @@ int main(int argc, char** argv) {
         double const aspectRatio = (double) vp.width / vp.height;
         camera.setScaling({ 1.0 / aspectRatio, 1.0 });
     };
-    
+
     // * * * * * * * * * * GUI * * * * * * * * * * * *
-    auto gui = [&app](Engine*, View*) {
+    auto gui = [&app](Engine*, View* view) {
         static bool sidebarVisible = false;
 
         if (ImGui::IsKeyPressed(ImGuiKey_P)) {
@@ -1161,16 +1308,21 @@ int main(int argc, char** argv) {
             sidebarVisible = !sidebarVisible;
         }
 
+        // Keep ViewerGui alive so setUiCallback keeps running for selection.
         if (sidebarVisible) {
             app.viewer->updateUserInterface();
             FilamentApp::get().setSidebarWidth(app.viewer->getSidebarWidth());
         } else {
+            ImGui::SetNextWindowCollapsed(true, ImGuiCond_Always);
+            app.viewer->updateUserInterface();
             FilamentApp::get().setSidebarWidth(0);
         }
     };
     // ------------------------------------------------------------------------
 
     auto preRender = [&app](Engine* engine, View* view, Scene* scene, Renderer* renderer) {
+        updateToolMove(app, ImGui::GetIO().DeltaTime);
+
         auto& rcm = engine->getRenderableManager();
         auto instance = rcm.getInstance(app.scene.groundPlane);
         const auto viewerOptions = app.automationEngine->getViewerOptions();
